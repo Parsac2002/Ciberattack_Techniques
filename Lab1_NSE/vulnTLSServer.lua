@@ -52,15 +52,15 @@ HIGH_count = 0
 MEDIUM_count = 0
 LOW_count = 0
 SUPPORTED_SUITES = {
-    "ECDHE-ECDSA-AES128-GCM-SHA256",
-    "ECDHE-RSA-AES128-GCM-SHA256",
-    "ECDHE-ECDSA-AES256-GCM-SHA384",
-    "ECDHE-RSA-AES256-GCM-SHA384",
-    "ECDHE-ECDSA-CHACHA20-POLY1305",
-    "ECDHE-RSA-CHACHA20-POLY1305",
-    "DHE-RSA-AES128-GCM-SHA256",
-    "DHE-RSA-AES256-GCM-SHA384",
-    "DHE-RSA-CHACHA20-POLY1305"
+    "TLS_ECDHE_ECDSA_AES128_GCM_SHA256",
+    "TLS_ECDHE_RSA_AES128_GCM_SHA256",
+    "TLS_ECDHE_ECDSA_AES256_GCM_SHA384",
+    "TLS_ECDHE_RSA_AES256_GCM_SHA384",
+    "TLS_ECDHE_ECDSA_CHACHA20_POLY1305",
+    "TLS_ECDHE_RSA_CHACHA20_POLY1305",
+    "TLS_DHE_RSA_AES128_GCM_SHA256",
+    "TLS_DHE_RSA_AES256_GCM_SHA384",
+    "TLS_DHE_RSA_CHACHA20_POLY1305"
 }
 
 SHA1_ciphers_without_cbc = {
@@ -200,37 +200,17 @@ local verify_cert_type = function (cert)
     end
 end
 
-local function get_body(record)
-    for i, b in ipairs(record.body[1]) do
-        print(string.format("Paremeter: %s", tostring(i)))
-    end
-    return nil
-end
-local function send_hello(hello_msg, host, port) then
-    
-end
-
-action = function(host, port)
-    -- Connect to the target server
-    local custom_hello
+local function send_hello(hello_msg, host, port)
     local status, err
     local sock
     local specialized = sslcert.getPrepareTLSWithoutReconnect(port)
     local response
-    stdnse.debug1("Preparing custom hello...")
-    custom_hello = tls.client_hello({
-        -- TLSv1.3 does not send this extension plaintext.
-        -- TODO: implement key exchange crypto to retrieve encrypted extensions
-        protocol = "TLSv1.2",
-        ciphers = SHA1_CBC_ciphers,
-        compressors = {"DEFLATE","LZS"}
-        -- compressors = {"LZS"}
-    })
+
     stdnse.debug1("Initiating socket connection...")
     if specialized then
         status, sock = specialized(host, port)
         if not status then
-            stdnse.debug1("Connection to serve r failed: %s", sock)
+            stdnse.debug1("Connection to server failed: %s", sock)
         return false
         end
     else
@@ -247,7 +227,7 @@ action = function(host, port)
 
     stdnse.debug1("Send Client Hello to the target server...")
     -- Send Client Hello to the target server
-    status, err = sock:send(custom_hello)
+    status, err = sock:send(hello_msg)
     if not status then
         stdnse.debug1("Couldn't send: %s", err)
         sock:close()
@@ -265,23 +245,119 @@ action = function(host, port)
         return false
     end
     
-    
-    -- Get certificate
-    host.targetname = tls.servername(host)
-    status, Cert = sslcert.getCertificate(host, port)
-    if ( not(status) ) then
-        stdnse.debug1("getCertificate error: %s", Cert or "unknown")
-        return
-    end
-
-    -- Verify message type to be server_hello
     local i, record = tls.record_read(response, 1)
     if record == nil then
         stdnse.debug1("Unknown response from server")
         return nil
     end
-    get_body(record)
-    stdnse.debug1("Record type: %s and body type: %s", record.type, record.body[1].type)
+    return record
+end
+
+local function check_supported_ciphers(host, port)
+    local custom_hello = tls.client_hello({
+        protocol = "TLSv1.2",
+        -- ciphers = SUPPORTED_SUITES
+        ciphers = CBC_ciphers_without_sha1
+    })
+    local record = send_hello(custom_hello, host, port)
+ 
+end
+
+-- True: handshake has failed
+-- False: handshake has succeeded
+local function check_handshake_failure(record)
+    if record.type == "alert" and record.body[1].description == "handshake_failure" then
+        stdnse.debug1("Handshake failed")
+        return true
+    else
+        stdnse.debug1("Handshake succeeded")
+        return false
+    end
+end
+
+local function check_validity(cert)
+    local notBefore = cert.validity.notBefore --ambos tablas
+    local notAfter = cert.validity.notAfter
+    --print(string.format("Not Before: %s", notBefore))
+    --print(string.format("Not After: %s", notAfter))
+
+    -- Convertir las fechas a formato de tabla de tiempo
+    -- local notBefore_time = datetime.parse_timestamp(notBefore)
+    -- local notAfter_time = datetime.parse_timestamp(notAfter)
+    local notBefore_seconds = datetime.date_to_timestamp(notBefore)
+    local notAfter_seconds = datetime.date_to_timestamp(notAfter)
+    local time_diff_days = (notAfter_seconds - notBefore_seconds)/(24*3600)
+
+    if time_diff_days < 90 or time_diff_days > 366 then
+        MEDIUM_count = MEDIUM_count + 1
+        table.insert(Medium_table, {title = "Invalid certificate validity period" , message = string.format("Validity period: %d days", time_diff_days)})
+        stdnse.debug(string.format("Validity period: %d days", time_diff_days))
+    end
+    stdnse.debug(string.format("Validity period: %d days", time_diff_days))
+end
+
+local function compare_CN_with_domain_name(cert, host)
+    -- host.targetname = tls.servername(host)
+    local CN = cert.subject.commonName
+
+    if host.targetname ~= CN then
+        MEDIUM_count = MEDIUM_count + 1
+        table.insert(Medium_table, {title = "Common name (CN) doesn't match Domain Name" , message = string.format("CN: %s & Domain Name: %s ", CN,host.targetname )})
+        stdnse.debug(string.format("CN: %s & Domain Name: %s ", CN,host.targetname ))
+    else
+        stdnse.debug(string.format("EQUAL: CN: %s & Domain Name: %s ", CN,host.targetname ))
+    end
+end    
+
+action = function(host, port)
+    -- Connect to the target server
+    local custom_hello
+    local status
+    local success_supported_cihpers = false
+    stdnse.debug1("Preparing custom hello...")
+    custom_hello = tls.client_hello({
+        -- TLSv1.3 does not send this extension plaintext.
+        -- TODO: implement key exchange crypto to retrieve encrypted extensions
+        protocol = "TLSv1.2",
+        ciphers = SHA1_CBC_ciphers,
+        compressors = {"DEFLATE","LZS"}
+        -- compressors = {"LZS"}
+    })
+    
+    local record = send_hello(custom_hello, host, port)
+    local failure = check_handshake_failure(record)
+    if failure then
+        custom_hello.ciphers = CBC_ciphers_without_sha1
+        record = send_hello(custom_hello, host, port)
+        failure = check_handshake_failure(record)
+        if failure then
+            custom_hello.ciphers = SHA1_ciphers_without_cbc
+            record = send_hello(custom_hello, host, port)
+            failure = check_handshake_failure(record)
+            if failure then
+                success_supported_cihpers = true
+                stdnse.debug("No CBC and SHA1 ciphers are supported")
+                check_supported_ciphers(host, port)
+            end
+        end
+    end
+    
+    
+    -- Get certificate
+    host.targetname = tls.servername(host)
+    status, Cert = sslcert.getCertificate(host, port)
+    
+    if ( not(status) ) then
+        stdnse.debug1("getCertificate error: %s", Cert or "unknown")
+        return
+    end
+    
+    --get_body(record)
+    if record and record.body and record.body[1] then
+        stdnse.debug1("Record type: %s and body type: %s", record.type, record.body[1].type)
+    else
+        stdnse.debug1("Record or record body is nil")
+    end
     
     if record.type == "handshake" and record.body[1].type == "server_hello" then
         --? Critical Alerts:
@@ -300,6 +376,11 @@ action = function(host, port)
         --? High Alerts
         -- Verify Cert_type
         verify_cert_type(Cert)
+        if not success_supported_cihpers then
+            check_supported_ciphers(host, port)
+        end
+        check_validity(Cert)
+        compare_CN_with_domain_name(Cert, host)
     end
 
 

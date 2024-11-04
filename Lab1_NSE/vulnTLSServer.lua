@@ -151,7 +151,7 @@ local verify_cipher_suite = function(record)
     stdnse.debug("Mode: %s && Hash Algo: %s", Cipher_suite.mode, Cipher_suite.hash)
     if Cipher_suite.mode == "CBC" and Cipher_suite.hash == "SHA" then
         CRITICAL_count = CRITICAL_count + 1
-        table.insert(Critical_table, {title = " Cipher includes CBC mode and SHA hash algorithm" , message = "."})
+        table.insert(Critical_table, {title = "Cipher includes CBC mode and SHA hash algorithm" , message = "."})
     elseif Cipher_suite.mode == "CBC" then
         CRITICAL_count = CRITICAL_count + 1
         table.insert(Critical_table, {title = "Cipher includes just CBC mode" , message = "."})
@@ -167,9 +167,9 @@ end
 
 local verify_compression = function(record) 
     stdnse.debug("Negociated compressor: %s", record.body[1].compressor)
-    if record.body[1].compressor ~= 0 then
+    if record.body[1].compressor ~= "NULL" then
         CRITICAL_count = CRITICAL_count + 1
-        table.insert(Critical_table, {title = "Compression STATE:" , message = "ACTIVATED."})
+        table.insert(Critical_table, {title = "Compression STATE" , message = "ACTIVATED."})
     end
 
 
@@ -307,8 +307,94 @@ local function compare_CN_with_domain_name(cert, host)
     else
         stdnse.debug(string.format("EQUAL: CN: %s & Domain Name: %s ", CN,host.targetname ))
     end
-end    
+end
+local function is_ip_address(cn)
+    -- Pattern to match an IPv4 address
+    local ip_pattern = "^%d+%.%d+%.%d+%.%d+$"
+    return cn:match(ip_pattern) ~= nil
+end
 
+local function check_CN_IP(cert)
+    local CN = cert.subject.commonName
+    if is_ip_address(CN) then
+        LOW_count = LOW_count + 1
+        table.insert(Low_table, {title = "Common name (CN) is an IP address" , message = string.format("CN -> %s", CN)})
+        stdnse.debug(string.format(" IP: CN -> %s ", CN ))
+    else
+        stdnse.debug(string.format("CN -> %s ", CN))
+    end
+end
+
+local function check_qualified_name(cert)
+    local CN = cert.subject.commonName
+    local alternative_names = {}
+
+    if not is_ip_address(CN) then
+        if not CN:match("%.") then
+            LOW_count = LOW_count + 1
+            table.insert(Low_table, {title = "Common name (CN) is a Non-Qualified Host Name" , message = string.format("CN -> %s", CN)})
+        end 
+    end
+    
+    if cert.extensions then
+        for _, e in ipairs(cert.extensions) do
+          if e.name == "X509v3 Subject Alternative Name" then
+            --alternative_names = e.value
+            local san = e.value
+            for name in san:gmatch("DNS:([^,]+)") do
+                table.insert(alternative_names, name)
+            end
+            break
+          end
+        end
+    end
+    
+    for _,alt_name in ipairs(alternative_names) do
+        
+        if not is_ip_address(alt_name) then
+            if not alt_name:match("%.") then
+                LOW_count = LOW_count + 1
+                table.insert(Low_table, {title = "Alternative name is a Non-Qualified Host Name" , message = string.format("Alternative name -> %s", alt_name)})
+            end
+            
+        end    
+    end   
+end
+
+local function print_warnings()
+-- *********************
+-- <SEVERITY> ALERTS: <number of these severity alerts>
+-- **********************
+    print(string.rep("*", 40))
+    print(string.format("CRITICAL ALERTS: %d", CRITICAL_count))
+    print(string.rep("*", 40))
+    for _, alert in ipairs(Critical_table) do
+        print(string.format("-  %s. %s", alert.title, alert.message))
+    end
+
+    print(string.rep("*", 40))
+    print(string.format("HIGH ALERTS: %d", HIGH_count))
+    print(string.rep("*", 40))
+    for _, alert in ipairs(High_table) do
+        print(string.format("-  %s. %s", alert.title, alert.message))
+    end
+
+    print(string.rep("*", 40))
+    print(string.format("MEDIUM ALERTS: %d", MEDIUM_count))
+    print(string.rep("*", 40))
+    for _, alert in ipairs(Medium_table) do
+        print(string.format("-  %s. %s", alert.title, alert.message))
+    end
+
+    print(string.rep("*", 40))
+    print(string.format("LOW ALERTS: %d", LOW_count))
+    print(string.rep("*", 40))
+    for _, alert in ipairs(Low_table) do
+        print(string.format("-  %s. %s", alert.title, alert.message))
+    end
+    print()
+
+end
 action = function(host, port)
     -- Connect to the target server
     local custom_hello
@@ -345,6 +431,7 @@ action = function(host, port)
     
     -- Get certificate
     host.targetname = tls.servername(host)
+    stdnse.debug("host targetname: %s", host.targetname)
     status, Cert = sslcert.getCertificate(host, port)
     
     if ( not(status) ) then
@@ -381,6 +468,9 @@ action = function(host, port)
         end
         check_validity(Cert)
         compare_CN_with_domain_name(Cert, host)
+        check_CN_IP(Cert)
+        check_qualified_name(Cert)
+        print_warnings()
     end
 
 
@@ -391,3 +481,4 @@ end
 
 -- Function = client_hello(t)
 
+-- 

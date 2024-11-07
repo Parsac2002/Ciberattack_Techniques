@@ -404,9 +404,12 @@ action = function(host, port)
     custom_hello = tls.client_hello({
         -- TLSv1.3 does not send this extension plaintext.
         -- TODO: implement key exchange crypto to retrieve encrypted extensions
-        protocol = "TLSv1.2",
+        protocol = "TLSv1.3",
         ciphers = SHA1_CBC_ciphers,
-        compressors = {"DEFLATE","LZS"}
+        compressors = {"DEFLATE","LZS"},
+        ["extensions"] = {
+            ["supported_versions"] = tls.EXTENSION_HELPERS["supported_versions"]({"TLSv1.0", "TLSv1.1", "TLSv1.2", "TLSv1.3", "SSLv3"})
+        },
         -- compressors = {"LZS"}
     })
     

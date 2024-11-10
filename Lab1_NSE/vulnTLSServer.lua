@@ -52,15 +52,15 @@ HIGH_count = 0
 MEDIUM_count = 0
 LOW_count = 0
 SUPPORTED_SUITES = {
-    "TLS_ECDHE_ECDSA_AES128_GCM_SHA256",
-    "TLS_ECDHE_RSA_AES128_GCM_SHA256",
-    "TLS_ECDHE_ECDSA_AES256_GCM_SHA384",
-    "TLS_ECDHE_RSA_AES256_GCM_SHA384",
-    "TLS_ECDHE_ECDSA_CHACHA20_POLY1305",
-    "TLS_ECDHE_RSA_CHACHA20_POLY1305",
-    "TLS_DHE_RSA_AES128_GCM_SHA256",
-    "TLS_DHE_RSA_AES256_GCM_SHA384",
-    "TLS_DHE_RSA_CHACHA20_POLY1305"
+    "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+    "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+    "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+    "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+    "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+    "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+    "TLS_DHE_RSA_WITH_AES_128_GCM_SHA256",
+    "TLS_DHE_RSA_WITH_AES_256_GCM_SHA384",
+    "TLS_DHE_RSA_WITH_CHACHA20_POLY1305"
 }
 
 SHA1_ciphers_without_cbc = {
@@ -199,6 +199,15 @@ local verify_cert_type = function (cert)
         stdnse.debug("No certificate found")
     end
 end
+local function verify_protocol_version(record)
+	local version = record.body[1].protocol
+	if tls.PROTOCOLS[version] <= tls.PROTOCOLS["TLSv1.0"] then
+		HIGH_count = HIGH_count + 1
+		table.insert(High_table, {title = "The server support TLSv1.0 or older versions" , message = string.format("Protocol version: %s", version)})
+	else
+		stdnse.debug("Version %s", version)
+	end	
+end
 
 local function send_hello(hello_msg, host, port)
     local status, err
@@ -206,7 +215,7 @@ local function send_hello(hello_msg, host, port)
     local specialized = sslcert.getPrepareTLSWithoutReconnect(port)
     local response
 
-    stdnse.debug1("Initiating socket connection...")
+    -- stdnse.debug1("Initiating socket connection...")
     if specialized then
         status, sock = specialized(host, port)
         if not status then
@@ -221,11 +230,11 @@ local function send_hello(hello_msg, host, port)
         return false
         end
     end
-    stdnse.debug1("Socket connection success && Setting timeout...")
+    -- stdnse.debug1("Socket connection success && Setting timeout...")
 
     sock:set_timeout(5000)
 
-    stdnse.debug1("Send Client Hello to the target server...")
+    -- stdnse.debug1("Send Client Hello to the target server...")
     -- Send Client Hello to the target server
     status, err = sock:send(hello_msg)
     if not status then
@@ -234,7 +243,7 @@ local function send_hello(hello_msg, host, port)
         return false
     end
 
-    stdnse.debug1("Reading response...")
+    -- stdnse.debug1("Reading response...")
     
     -- Read Response
     status, response, err = tls.record_buffer(sock)
@@ -254,12 +263,13 @@ local function send_hello(hello_msg, host, port)
 end
 
 local function check_supported_ciphers(host, port)
+    stdnse.debug("Checking supported ciphers...")
     local custom_hello = tls.client_hello({
         protocol = "TLSv1.2",
         -- ciphers = SUPPORTED_SUITES
         ciphers = CBC_ciphers_without_sha1
     })
-    local record = send_hello(custom_hello, host, port)
+    local record = send_hello(custom_hello, host, port)return record
  
 end
 
@@ -393,40 +403,90 @@ local function print_warnings()
         print(string.format("-  %s. %s", alert.title, alert.message))
     end
     print()
+end
+
+local function build_custom_hello(protocol, 
+    list_of_ciphers, bool_need_supported_versions, compressors, list_supported_versions)
+    
+    if not list_supported_versions then
+        -- list_supported_versions = {"TLSv1.0", "TLSv1.1", "TLSv1.2", "TLSv1.3", "SSLv3"}
+        list_supported_versions = {"TLSv1.3", "TLSv1.2", "TLSv1.1", "TLSv1.0", "SSLv3"}
+    end
+    
+    local custom_hello
+    
+    if bool_need_supported_versions and not compressors then
+        custom_hello = tls.client_hello({
+            protocol = protocol,
+            record_protocol = "TLSv1.0",
+            ciphers = list_of_ciphers,
+            ["extensions"] = {
+                ["supported_versions"] = tls.EXTENSION_HELPERS["supported_versions"](list_supported_versions)
+            }
+        })
+    elseif bool_need_supported_versions and not bool_need_supported_versions then
+        custom_hello = tls.client_hello({
+            protocol = protocol,
+            record_protocol = "TLSv1.0",
+            ciphers = list_of_ciphers,
+            compressors = compressors
+        })
+    elseif bool_need_supported_versions and compressors then
+        custom_hello = tls.client_hello({
+            protocol = protocol,
+            record_protocol = "TLSv1.0",
+            ciphers = list_of_ciphers,
+            compressors = compressors,
+            ["extensions"] = {
+                ["supported_versions"] = tls.EXTENSION_HELPERS["supported_versions"](list_supported_versions)
+            }
+        })
+    else 
+        custom_hello = tls.client_hello({
+            protocol = protocol,
+            record_protocol = "TLSv1.0",
+            ciphers = list_of_ciphers
+        })
+    end
+    return custom_hello
 
 end
+
 action = function(host, port)
     -- Connect to the target server
     local custom_hello
     local status
     local success_supported_cihpers = false
     stdnse.debug1("Preparing custom hello...")
-    custom_hello = tls.client_hello({
-        -- TLSv1.3 does not send this extension plaintext.
-        -- TODO: implement key exchange crypto to retrieve encrypted extensions
-        protocol = "TLSv1.3",
-        ciphers = SHA1_CBC_ciphers,
-        compressors = {"DEFLATE","LZS"},
-        ["extensions"] = {
-            ["supported_versions"] = tls.EXTENSION_HELPERS["supported_versions"]({"TLSv1.0", "TLSv1.1", "TLSv1.2", "TLSv1.3", "SSLv3"})
-        },
-        -- compressors = {"LZS"}
-    })
+    custom_hello = build_custom_hello("TLSv1.3", SHA1_CBC_ciphers, true,{"DEFLATE","LZS"}, nil)
     
     local record = send_hello(custom_hello, host, port)
+    
+    stdnse.debug1("protocol of the response: %s", record.protocol)
+
     local failure = check_handshake_failure(record)
-    if failure then
-        custom_hello.ciphers = CBC_ciphers_without_sha1
+    if failure and record.protocol == "TLSv1.0" then
+        stdnse.debug("Resending hello with just SHA1 CBC cyphers")
+        custom_hello = build_custom_hello("TLSv1.0", SHA1_CBC_ciphers,false,nil, nil)
+        record = send_hello(custom_hello, host, port)
+        failure = check_handshake_failure(record)
+    elseif failure then
+        stdnse.debug("Resending hello with just CBC cyphers")
+        -- custom_hello.ciphers = CBC_ciphers_without_sha1
+        -- custom_hello = build_custom_hello("TLSv1.2", CBC_ciphers_without_sha1,false,{"DEFLATE","LZS"}, nil)
+        custom_hello = build_custom_hello("TLSv1.3", CBC_ciphers_without_sha1,true,{"DEFLATE","LZS"}, nil)
         record = send_hello(custom_hello, host, port)
         failure = check_handshake_failure(record)
         if failure then
-            custom_hello.ciphers = SHA1_ciphers_without_cbc
+            -- custom_hello.ciphers = SHA1_ciphers_without_cbc
+            stdnse.debug("Resending hello with just SHA cyphers")
+            custom_hello = build_custom_hello("TLSv1.2", SHA1_ciphers_without_cbc,false,{"DEFLATE","LZS"}, nil)
             record = send_hello(custom_hello, host, port)
             failure = check_handshake_failure(record)
             if failure then
                 success_supported_cihpers = true
                 stdnse.debug("No CBC and SHA1 ciphers are supported")
-                check_supported_ciphers(host, port)
+                record = check_supported_ciphers(host, port)
             end
         end
     end
@@ -466,6 +526,7 @@ action = function(host, port)
         --? High Alerts
         -- Verify Cert_type
         verify_cert_type(Cert)
+        --verify_protocol_version(record)
         if not success_supported_cihpers then
             check_supported_ciphers(host, port)
         end
